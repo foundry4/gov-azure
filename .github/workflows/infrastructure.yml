@@ -5,7 +5,9 @@ on:
     branches: [ main ]
 
 env:
+  # For creating this secret value, see: https://github.com/marketplace/actions/azure-login#configure-deployment-credentials
   credentials: ${{ secrets.AZURE_CREDENTIALS }}
+  resource_group: dev
 
 jobs:
 
@@ -17,14 +19,14 @@ jobs:
     steps:
     - uses: azure/login@v1
       with:
-        creds: ${{ credentials }}
+        creds: ${{ env.credentials }}
 
     - name: Defaults
       uses: Azure/cli@v1.0.0
       with:
         inlineScript: |
           az configure --defaults location=uksouth
-          az configure --defaults group=${{ secrets.DEV_RESOURCE_GROUP }}
+          az configure --defaults group=${{ env.resource_group }}
 
     - name: App Service plan
       uses: Azure/cli@v1.0.0
