@@ -198,7 +198,7 @@ jobs:
       uses: Azure/cli@v1.0.0
       with:
         inlineScript: |
-          az webapp create --name ${{ env.environment }}-portal-ui \
+          az webapp create --name gov-azure-${{ env.environment }}-portal-ui \
             --plan ${{ env.app_service_plan }} \
             --deployment-container-image-name ${{ env.registry }}/portal-ui:${{ env.environment }}
 
@@ -207,7 +207,7 @@ jobs:
       with:
         # Enable outbound traffic to the private-endpoints subnet so we can access Portal API and Redis
         inlineScript: |
-          az webapp vnet-integration add --name ${{ env.environment }}-portal-ui \
+          az webapp vnet-integration add --name gov-azure-${{ env.environment }}-portal-ui \
             --vnet ${{ env.app_service_plan }}-vnet \
             --subnet ${{ env.app_service_plan }}-app-service-plan-egress
 
@@ -218,14 +218,14 @@ jobs:
         # NB: group-id isn't well documented. It means "Target sub-resource"
         #     The purpose of connection-name is unknown.
         inlineScript: |
-          portal_ui_id=$(az webapp show --name ${{ env.environment }}-portal-ui --query "id" -o tsv)
+          portal_ui_id=$(az webapp show --name gov-azure-${{ env.environment }}-portal-ui --query "id" -o tsv)
           az network private-endpoint create \
-            --name ${{ env.environment }}-portal-ui \
+            --name gov-azure-${{ env.environment }}-portal-ui \
             --vnet-name ${{ env.app_service_plan }}-vnet \
             --subnet ${{ env.environment }}-private-endpoints \
             --private-connection-resource-id "$portal_ui_id" \
             --group-id sites \
-            --connection-name ${{ env.environment }}-portal-ui
+            --connection-name gov-azure-${{ env.environment }}-portal-ui
 
     - name: DNS A-records
       uses: Azure/cli@v1.0.0
@@ -233,9 +233,9 @@ jobs:
         # We have to add explicit A records so that App Service names resolve correctly to the private endpoint address
         # https://docs.microsoft.com/en-us/azure/app-service/networking/private-endpoint#dns
         inlineScript: |
-          ipv4_address=$(az network private-dns record-set a show --name ${{ env.environment }}-portal-ui --zone-name "privatelink.azurewebsites.net" --query "aRecords[0].ipv4Address" -o tsv || echo "")
+          ipv4_address=$(az network private-dns record-set a show --name gov-azure-${{ env.environment }}-portal-ui --zone-name "privatelink.azurewebsites.net" --query "aRecords[0].ipv4Address" -o tsv || echo "")
 
-          interface_id=$(az network private-endpoint show --name ${{ env.environment }}-portal-ui --query 'networkInterfaces[0].id' -o tsv)
+          interface_id=$(az network private-endpoint show --name gov-azure-${{ env.environment }}-portal-ui --query 'networkInterfaces[0].id' -o tsv)
           interface_ip=$(az resource show --ids "$interface_id" --query "properties.ipConfigurations[0].properties.privateIPAddress" -o tsv)
           
           # Create
@@ -243,15 +243,15 @@ jobs:
           then
             echo Setting private link IP address...
 
-            az network private-dns record-set a create --name ${{ env.environment }}-portal-ui --zone-name "privatelink.azurewebsites.net"
+            az network private-dns record-set a create --name gov-azure-${{ env.environment }}-portal-ui --zone-name "privatelink.azurewebsites.net"
             az network private-dns record-set a add-record \
-              --record-set-name ${{ env.environment }}-portal-ui \
+              --record-set-name gov-azure-${{ env.environment }}-portal-ui \
               --zone-name "privatelink.azurewebsites.net" \
               --ipv4-address $interface_ip
             
-            az network private-dns record-set a create --name ${{ env.environment }}-portal-ui.scm --zone-name "privatelink.azurewebsites.net"
+            az network private-dns record-set a create --name gov-azure-${{ env.environment }}-portal-ui.scm --zone-name "privatelink.azurewebsites.net"
             az network private-dns record-set a add-record \
-              --record-set-name ${{ env.environment }}-portal-ui.scm \
+              --record-set-name gov-azure-${{ env.environment }}-portal-ui.scm \
               --zone-name "privatelink.azurewebsites.net" \
               --ipv4-address $interface_ip
           fi
@@ -261,17 +261,17 @@ jobs:
           then
             echo Updating private link IP address...
 
-            az network private-dns record-set a delete --name ${{ env.environment }}-portal-ui --zone-name "privatelink.azurewebsites.net" --yes
-            az network private-dns record-set a create --name ${{ env.environment }}-portal-ui --zone-name "privatelink.azurewebsites.net"
+            az network private-dns record-set a delete --name gov-azure-${{ env.environment }}-portal-ui --zone-name "privatelink.azurewebsites.net" --yes
+            az network private-dns record-set a create --name gov-azure-${{ env.environment }}-portal-ui --zone-name "privatelink.azurewebsites.net"
             az network private-dns record-set a add-record \
-              --record-set-name ${{ env.environment }}-portal-ui \
+              --record-set-name gov-azure-${{ env.environment }}-portal-ui \
               --zone-name "privatelink.azurewebsites.net" \
               --ipv4-address $interface_ip
 
-            az network private-dns record-set a delete --name ${{ env.environment }}-portal-ui.scm --zone-name "privatelink.azurewebsites.net" --yes
-            az network private-dns record-set a create --name ${{ env.environment }}-portal-ui.scm --zone-name "privatelink.azurewebsites.net"
+            az network private-dns record-set a delete --name gov-azure-${{ env.environment }}-portal-ui.scm --zone-name "privatelink.azurewebsites.net" --yes
+            az network private-dns record-set a create --name gov-azure-${{ env.environment }}-portal-ui.scm --zone-name "privatelink.azurewebsites.net"
             az network private-dns record-set a add-record \
-              --record-set-name ${{ env.environment }}-portal-ui.scm \
+              --record-set-name gov-azure-${{ env.environment }}-portal-ui.scm \
               --zone-name "privatelink.azurewebsites.net" \
               --ipv4-address $interface_ip
           fi
@@ -280,21 +280,21 @@ jobs:
       uses: Azure/cli@v1.0.0
       with:
         inlineScript: |
-          az webapp deployment container config --name ${{ env.environment }}-portal-ui \
+          az webapp deployment container config --name gov-azure-${{ env.environment }}-portal-ui \
             --enable-cd true
 
     - name: Enable container logging
       uses: Azure/cli@v1.0.0
       with:
         inlineScript: |
-          az webapp log config --name ${{ env.environment }}-portal-ui \
+          az webapp log config --name gov-azure-${{ env.environment }}-portal-ui \
             --docker-container-logging filesystem
 
     - name: Always-on
       uses: Azure/cli@v1.0.0
       with:
         inlineScript: |
-          az webapp config set --name ${{ env.environment }}-portal-ui \
+          az webapp config set --name gov-azure-${{ env.environment }}-portal-ui \
             --always-on true
 
     - name: Environment variables
@@ -304,7 +304,7 @@ jobs:
         # See: https://docs.microsoft.com/en-us/azure/app-service/web-sites-integrate-with-vnet#azure-dns-private-zones
         # NB we're setting PORT for the container and WEBSITES_PORT for Azure.
         inlineScript: |
-          az webapp config appsettings set --name ${{ env.environment }}-portal-ui \
+          az webapp config appsettings set --name gov-azure-${{ env.environment }}-portal-ui \
             --settings \
               PORT=3000 \
               WEBSITES_PORT=3000 \
@@ -316,7 +316,7 @@ jobs:
       uses: Azure/cli@v1.0.0
       with:
         inlineScript: |
-          az webapp config connection-string set --name ${{ env.environment }}-portal-ui \
+          az webapp config connection-string set --name gov-azure-${{ env.environment }}-portal-ui \
             --connection-string-type custom \
             --settings \
               REDIS_URI="${{ env.REDIS_URI }}"
@@ -342,7 +342,7 @@ jobs:
       uses: Azure/cli@v1.0.0
       with:
         inlineScript: |
-          az network private-endpoint delete --name "${{ env.environment }}-mongo"
+          az network private-endpoint delete --name "gov-azure-${{ env.environment }}-mongo"
       
     - name: Cosmos account for mongodb
       uses: Azure/cli@v1.0.0
@@ -357,7 +357,7 @@ jobs:
         # US Gov 52.244.48.71
         # All other regions 104.42.195.92,40.76.54.131,52.176.6.30,52.169.50.45,52.187.184.26
         inlineScript: |
-          az cosmosdb create --name ${{ env.environment }}-mongo --kind MongoDB --server-version 3.6
+          az cosmosdb create --name gov-azure-${{ env.environment }}-mongo --kind MongoDB --server-version 3.6
 
     - name: Database with autoscale
       uses: Azure/cli@v1.0.0
@@ -365,7 +365,7 @@ jobs:
         # TODO: switch from provisioned throughput to "serverless" capacity at the account level once it's available for Mongo (currently available for sql).
         # TODO: enable continuous backup once that becomes available - looks like it's in private beta at the moment.
         inlineScript: |
-          az cosmosdb mongodb database create --account ${{ env.environment }}-mongo --name ${{ env.database_name }} --max-throughput 4000
+          az cosmosdb mongodb database create --account gov-azure-${{ env.environment }}-mongo --name ${{ env.database_name }} --max-throughput 4000
 
   cosmos-db-init:
     name: Cosmos DB (Mongo) Initialise Collections
@@ -388,8 +388,8 @@ jobs:
       with:
         # Creating collections is slow, so we show them before we attempt to create.
         inlineScript: |
-          az cosmosdb mongodb collection show   --account ${{ env.environment }}-mongo --database-name ${{ env.database_name }} --name documents || \
-          az cosmosdb mongodb collection create --account ${{ env.environment }}-mongo --database-name ${{ env.database_name }} --name documents --shard "_id" 
+          az cosmosdb mongodb collection show   --account gov-azure-${{ env.environment }}-mongo --database-name ${{ env.database_name }} --name documents || \
+          az cosmosdb mongodb collection create --account gov-azure-${{ env.environment }}-mongo --database-name ${{ env.database_name }} --name documents --shard "_id" 
           #  --idx '[{"key": {"keys": ["indext.key.name"]}}, {"key": {"keys": ["_id"]}}]'     
           
     - name: Private link
@@ -399,14 +399,14 @@ jobs:
         # NB: group-id isn't well documented. It means "Target sub-resource"
         #     The purpose of connection-name is unknown.
         inlineScript: |
-          mongo_id=$(az cosmosdb show --name ${{ env.environment }}-mongo --query "id" -o tsv)
+          mongo_id=$(az cosmosdb show --name gov-azure-${{ env.environment }}-mongo --query "id" -o tsv)
           az network private-endpoint create \
-            --name ${{ env.environment }}-mongo \
+            --name gov-azure-${{ env.environment }}-mongo \
             --vnet-name ${{ env.app_service_plan }}-vnet \
             --subnet ${{ env.environment }}-private-endpoints \
             --private-connection-resource-id "$mongo_id" \
             --group-id MongoDB \
-            --connection-name ${{ env.environment }}-mongo
+            --connection-name gov-azure-${{ env.environment }}-mongo
     
     - name: DNS A-records
       uses: Azure/cli@v1.0.0
@@ -416,30 +416,30 @@ jobs:
         # NB the zone name needs to be "privatelink.mongo.cosmos.azure.com" rather than "privatelink.documents.azure.com" as per the link above.
         # NB ipConfigurations[0] appears to be the "primary". There's also a property called "requiredMemberName" that *seems* to be the value needed for record-set-name but I can't find any documentation on it, so sticking with [0] and [1] for now:
         inlineScript: |
-          ipv4_address=$(az network private-dns record-set a show --name ${{ env.environment }}-mongo --zone-name "privatelink.mongo.cosmos.azure.com" --query "aRecords[0].ipv4Address" -o tsv || echo "")
+          ipv4_address=$(az network private-dns record-set a show --name gov-azure-${{ env.environment }}-mongo --zone-name "privatelink.mongo.cosmos.azure.com" --query "aRecords[0].ipv4Address" -o tsv || echo "")
 
           if [ -z "$ipv4_address" ]
           then
-            mongo_interface_id=$(az network private-endpoint show --name ${{ env.environment }}-mongo --query 'networkInterfaces[0].id' -o tsv)
+            mongo_interface_id=$(az network private-endpoint show --name gov-azure-${{ env.environment }}-mongo --query 'networkInterfaces[0].id' -o tsv)
 
             mongo_interface_ip=$(az resource show --ids $mongo_interface_id --query "properties.ipConfigurations[0].properties.privateIPAddress" -o tsv)
-            az network private-dns record-set a show   --name ${{ env.environment }}-mongo --zone-name "privatelink.mongo.cosmos.azure.com" || \
-            az network private-dns record-set a create --name ${{ env.environment }}-mongo --zone-name "privatelink.mongo.cosmos.azure.com"
+            az network private-dns record-set a show   --name gov-azure-${{ env.environment }}-mongo --zone-name "privatelink.mongo.cosmos.azure.com" || \
+            az network private-dns record-set a create --name gov-azure-${{ env.environment }}-mongo --zone-name "privatelink.mongo.cosmos.azure.com"
             az network private-dns record-set a add-record \
-              --record-set-name ${{ env.environment }}-mongo \
+              --record-set-name gov-azure-${{ env.environment }}-mongo \
               --zone-name "privatelink.mongo.cosmos.azure.com" \
               --ipv4-address $mongo_interface_ip
 
             mongo_uksouth_interface_ip=$(az resource show --ids $mongo_interface_id --query "properties.ipConfigurations[1].properties.privateIPAddress" -o tsv)
-            az network private-dns record-set a show   --name ${{ env.environment }}-mongo-uksouth --zone-name "privatelink.mongo.cosmos.azure.com" || \
-            az network private-dns record-set a create --name ${{ env.environment }}-mongo-uksouth --zone-name "privatelink.mongo.cosmos.azure.com"
+            az network private-dns record-set a show   --name gov-azure-${{ env.environment }}-mongo-uksouth --zone-name "privatelink.mongo.cosmos.azure.com" || \
+            az network private-dns record-set a create --name gov-azure-${{ env.environment }}-mongo-uksouth --zone-name "privatelink.mongo.cosmos.azure.com"
             az network private-dns record-set a add-record \
-              --record-set-name ${{ env.environment }}-mongo-uksouth \
+              --record-set-name gov-azure-${{ env.environment }}-mongo-uksouth \
               --zone-name "privatelink.mongo.cosmos.azure.com" \
               --ipv4-address $mongo_uksouth_interface_ip
 
           else
-            echo "IP for ${{ env.environment }}-mongo.privatelink.mongo.cosmos.azure.com is $ipv4_address"
+            echo "IP for gov-azure-${{ env.environment }}-mongo.privatelink.mongo.cosmos.azure.com is $ipv4_address"
           fi
               
 
@@ -463,7 +463,7 @@ jobs:
       uses: Azure/cli@v1.0.0
       with:
         inlineScript: |
-          az webapp create --name ${{ env.environment }}-portal-api \
+          az webapp create --name gov-azure-${{ env.environment }}-portal-api \
             --plan ${{ env.app_service_plan }} \
             --deployment-container-image-name ${{ env.registry }}/portal-api:${{ env.environment }}
 
@@ -472,7 +472,7 @@ jobs:
       with:
         # Enable outbound traffic from Portal API to the services subnet so we can access Cosmos and Storage
         inlineScript: |
-          az webapp vnet-integration add --name ${{ env.environment }}-portal-api \
+          az webapp vnet-integration add --name gov-azure-${{ env.environment }}-portal-api \
             --vnet ${{ env.app_service_plan }}-vnet \
             --subnet ${{ env.app_service_plan }}-app-service-plan-egress
 
@@ -483,14 +483,14 @@ jobs:
         # NB: group-id isn't well documented. It means "Target sub-resource".
         #     The purpose of connection-name is unknown.
         inlineScript: |
-          portal_api_id=$(az webapp show --name ${{ env.environment }}-portal-api --query "id" -o tsv)
+          portal_api_id=$(az webapp show --name gov-azure-${{ env.environment }}-portal-api --query "id" -o tsv)
           az network private-endpoint create \
-            --name ${{ env.environment }}-portal-api \
+            --name gov-azure-${{ env.environment }}-portal-api \
             --vnet-name ${{ env.app_service_plan }}-vnet \
             --subnet ${{ env.environment }}-private-endpoints \
             --private-connection-resource-id "$portal_api_id" \
             --group-id sites \
-            --connection-name ${{ env.environment }}-portal-api
+            --connection-name gov-azure-${{ env.environment }}-portal-api
 
     - name: DNS A-records
       uses: Azure/cli@v1.0.0
@@ -499,9 +499,9 @@ jobs:
         # https://docs.microsoft.com/en-us/azure/app-service/networking/private-endpoint#dns
         # NB the -z tests below are checking 
         inlineScript: |
-          ipv4_address=$(az network private-dns record-set a show --name ${{ env.environment }}-portal-api --zone-name "privatelink.azurewebsites.net" --query "aRecords[0].ipv4Address" -o tsv || echo "")
+          ipv4_address=$(az network private-dns record-set a show --name gov-azure-${{ env.environment }}-portal-api --zone-name "privatelink.azurewebsites.net" --query "aRecords[0].ipv4Address" -o tsv || echo "")
 
-          interface_id=$(az network private-endpoint show --name ${{ env.environment }}-portal-api --query 'networkInterfaces[0].id' -o tsv)
+          interface_id=$(az network private-endpoint show --name gov-azure-${{ env.environment }}-portal-api --query 'networkInterfaces[0].id' -o tsv)
           interface_ip=$(az resource show --ids "$interface_id" --query "properties.ipConfigurations[0].properties.privateIPAddress" -o tsv)
           
           # Create
@@ -509,15 +509,15 @@ jobs:
           then
             echo Setting private link IP address...
 
-            az network private-dns record-set a create --name ${{ env.environment }}-portal-api --zone-name "privatelink.azurewebsites.net"
+            az network private-dns record-set a create --name gov-azure-${{ env.environment }}-portal-api --zone-name "privatelink.azurewebsites.net"
             az network private-dns record-set a add-record \
-              --record-set-name ${{ env.environment }}-portal-api \
+              --record-set-name gov-azure-${{ env.environment }}-portal-api \
               --zone-name "privatelink.azurewebsites.net" \
               --ipv4-address $interface_ip
             
-            az network private-dns record-set a create --name ${{ env.environment }}-portal-api.scm --zone-name "privatelink.azurewebsites.net"
+            az network private-dns record-set a create --name gov-azure-${{ env.environment }}-portal-api.scm --zone-name "privatelink.azurewebsites.net"
             az network private-dns record-set a add-record \
-              --record-set-name ${{ env.environment }}-portal-api.scm \
+              --record-set-name gov-azure-${{ env.environment }}-portal-api.scm \
               --zone-name "privatelink.azurewebsites.net" \
               --ipv4-address $interface_ip
           fi
@@ -527,17 +527,17 @@ jobs:
           then
             echo Update private link IP address...
 
-            az network private-dns record-set a delete --name ${{ env.environment }}-portal-api --zone-name "privatelink.azurewebsites.net" --yes
-            az network private-dns record-set a create --name ${{ env.environment }}-portal-api --zone-name "privatelink.azurewebsites.net"
+            az network private-dns record-set a delete --name gov-azure-${{ env.environment }}-portal-api --zone-name "privatelink.azurewebsites.net" --yes
+            az network private-dns record-set a create --name gov-azure-${{ env.environment }}-portal-api --zone-name "privatelink.azurewebsites.net"
             az network private-dns record-set a add-record \
-              --record-set-name ${{ env.environment }}-portal-api \
+              --record-set-name gov-azure-${{ env.environment }}-portal-api \
               --zone-name "privatelink.azurewebsites.net" \
               --ipv4-address $interface_ip
 
-            az network private-dns record-set a delete --name ${{ env.environment }}-portal-api.scm --zone-name "privatelink.azurewebsites.net" --yes
-            az network private-dns record-set a create --name ${{ env.environment }}-portal-api.scm --zone-name "privatelink.azurewebsites.net"
+            az network private-dns record-set a delete --name gov-azure-${{ env.environment }}-portal-api.scm --zone-name "privatelink.azurewebsites.net" --yes
+            az network private-dns record-set a create --name gov-azure-${{ env.environment }}-portal-api.scm --zone-name "privatelink.azurewebsites.net"
             az network private-dns record-set a add-record \
-              --record-set-name ${{ env.environment }}-portal-api.scm \
+              --record-set-name gov-azure-${{ env.environment }}-portal-api.scm \
               --zone-name "privatelink.azurewebsites.net" \
               --ipv4-address $interface_ip
           fi
@@ -546,21 +546,21 @@ jobs:
       uses: Azure/cli@v1.0.0
       with:
         inlineScript: |
-          az webapp deployment container config --name ${{ env.environment }}-portal-api \
+          az webapp deployment container config --name gov-azure-${{ env.environment }}-portal-api \
             --enable-cd true
 
     - name: Enable container logging
       uses: Azure/cli@v1.0.0
       with:
         inlineScript: |
-          az webapp log config --name ${{ env.environment }}-portal-api \
+          az webapp log config --name gov-azure-${{ env.environment }}-portal-api \
             --docker-container-logging filesystem
 
     - name: Always-on
       uses: Azure/cli@v1.0.0
       with:
         inlineScript: |
-          az webapp config set --name ${{ env.environment }}-portal-api \
+          az webapp config set --name gov-azure-${{ env.environment }}-portal-api \
             --always-on true
 
     - name: Environment variables
@@ -570,7 +570,7 @@ jobs:
         # See: https://docs.microsoft.com/en-us/azure/app-service/web-sites-integrate-with-vnet#azure-dns-private-zones
         # NB we're setting PORT for the container and WEBSITES_PORT for Azure.
         inlineScript: |
-          az webapp config appsettings set --name ${{ env.environment }}-portal-api \
+          az webapp config appsettings set --name gov-azure-${{ env.environment }}-portal-api \
             --settings \
               PORT=5000 \
               WEBSITES_PORT=5000 \
@@ -581,11 +581,11 @@ jobs:
       uses: Azure/cli@v1.0.0
       with:
         inlineScript: |
-          mongo_connection_string=$(az cosmosdb keys list --name ${{ env.environment }}-mongo --type connection-strings --query "connectionStrings[0].connectionString" -o tsv | sed -e "s/&replicaSet=globaldb//g")
+          mongo_connection_string=$(az cosmosdb keys list --name gov-azure-${{ env.environment }}-mongo --type connection-strings --query "connectionStrings[0].connectionString" -o tsv | sed -e "s/&replicaSet=globaldb//g")
 
           echo "Mongo connection string: $mongo_connection_string"
           
-          az webapp config connection-string set --name ${{ env.environment }}-portal-api \
+          az webapp config connection-string set --name gov-azure-${{ env.environment }}-portal-api \
             --connection-string-type custom \
             --settings \
               STORAGE_ACCOUNT="${{ env.AZURE_PORTAL_STORAGE_ACCOUNT }}" \
@@ -613,7 +613,7 @@ jobs:
       uses: Azure/cli@v1.0.0
       with:
         inlineScript: |
-          az storage account create --name ${{ env.environment }}storage \
+          az storage account create --name govazure${{ env.environment }}storage \
             --sku Standard_ZRS \
             --https-only true \
             --encryption-services file
@@ -622,14 +622,14 @@ jobs:
       uses: Azure/cli@v1.0.0
       with:
         inlineScript: |
-          az storage share create --account-name ${{ env.environment }}storage --name files
+          az storage share create --account-name govazure${{ env.environment }}storage --name files
 
     - name: File share (workflow)
       uses: Azure/cli@v1.0.0
       with:
         # This fileshare is used if the environment isn't integrated to Workflow.
         inlineScript: |
-          az storage share create --account-name ${{ env.environment }}storage --name workflow
+          az storage share create --account-name govazure${{ env.environment }}storage --name workflow
 
     - name: Private link
       uses: Azure/cli@v1.0.0
@@ -638,14 +638,14 @@ jobs:
         # NB: group-id isn't well documented. It means "Target sub-resource"
         #     The purpose of connection-name is unknown.
         inlineScript: |
-          file_storage_id=$(az storage account show --name ${{ env.environment }}storage --query "id" -o tsv)
+          file_storage_id=$(az storage account show --name govazure${{ env.environment }}storage --query "id" -o tsv)
           az network private-endpoint create \
-            --name ${{ env.environment }}storage \
+            --name govazure${{ env.environment }}storage \
             --vnet-name ${{ env.app_service_plan }}-vnet \
             --subnet ${{ env.environment }}-private-endpoints \
             --private-connection-resource-id "$file_storage_id" \
             --group-id file \
-            --connection-name ${{ env.environment }}storage
+            --connection-name govazure${{ env.environment }}storage
              
     - name: DNS A-records
       uses: Azure/cli@v1.0.0
@@ -653,9 +653,9 @@ jobs:
         # We have to add explicit A records so that Stogare Accounts resolve correctly to the private endpoint address
         # https://docs.microsoft.com/en-us/azure/storage/files/storage-files-networking-endpoints?tabs=azure-cli
         inlineScript: |
-          ipv4_address=$(az network private-dns record-set a show --name ${{ env.environment }}storage --zone-name "privatelink.file.core.windows.net" --query "aRecords[0].ipv4Address" -o tsv || echo "")
+          ipv4_address=$(az network private-dns record-set a show --name govazure${{ env.environment }}storage --zone-name "privatelink.file.core.windows.net" --query "aRecords[0].ipv4Address" -o tsv || echo "")
 
-          interface_id=$(az network private-endpoint show --name ${{ env.environment }}storage --query 'networkInterfaces[0].id' -o tsv)
+          interface_id=$(az network private-endpoint show --name govazure${{ env.environment }}storage --query 'networkInterfaces[0].id' -o tsv)
           interface_ip=$(az resource show --ids "$interface_id" --query "properties.ipConfigurations[0].properties.privateIPAddress" -o tsv)
           
           # Create
@@ -663,9 +663,9 @@ jobs:
           then
             echo Setting private link IP address...
 
-            az network private-dns record-set a create --name ${{ env.environment }}storage --zone-name "privatelink.file.core.windows.net"
+            az network private-dns record-set a create --name govazure${{ env.environment }}storage --zone-name "privatelink.file.core.windows.net"
             az network private-dns record-set a add-record \
-              --record-set-name ${{ env.environment }}storage \
+              --record-set-name govazure${{ env.environment }}storage \
               --zone-name "privatelink.file.core.windows.net" \
               --ipv4-address $interface_ip
           fi
@@ -675,10 +675,10 @@ jobs:
           then
             echo Updating private link IP address...
 
-            az network private-dns record-set a delete --name ${{ env.environment }}storage --zone-name "privatelink.file.core.windows.net" --yes
-            az network private-dns record-set a create --name ${{ env.environment }}storage --zone-name "privatelink.file.core.windows.net"
+            az network private-dns record-set a delete --name govazure${{ env.environment }}storage --zone-name "privatelink.file.core.windows.net" --yes
+            az network private-dns record-set a create --name govazure${{ env.environment }}storage --zone-name "privatelink.file.core.windows.net"
             az network private-dns record-set a add-record \
-              --record-set-name ${{ env.environment }}storage \
+              --record-set-name govazure${{ env.environment }}storage \
               --zone-name "privatelink.file.core.windows.net" \
               --ipv4-address $interface_ip
           fi
@@ -704,7 +704,7 @@ jobs:
       uses: Azure/cli@v1.0.0
       with:
         inlineScript: |
-          az redis create --name ${{ env.environment }}-redis \
+          az redis create --name gov-azure-${{ env.environment }}-redis \
             --sku ${{ env.redis_sku }} \
             --vm-size C0
     
@@ -718,23 +718,23 @@ jobs:
         # NB: group-id isn't well documented. It means "Target sub-resource"
         #     The purpose of connection-name is unknown.
         inlineScript: |
-          redis_id=$(az redis show --name ${{ env.environment }}-redis --query "id" -o tsv)
+          redis_id=$(az redis show --name gov-azure-${{ env.environment }}-redis --query "id" -o tsv)
           az network private-endpoint create \
-            --name ${{ env.environment }}-redis \
+            --name gov-azure-${{ env.environment }}-redis \
             --vnet-name ${{ env.app_service_plan }}-vnet \
             --subnet ${{ env.environment }}-private-endpoints \
             --private-connection-resource-id "$redis_id" \
             --group-id redisCache \
-            --connection-name ${{ env.environment }}-redis
+            --connection-name gov-azure-${{ env.environment }}-redis
              
     - name: DNS A-records
       uses: Azure/cli@v1.0.0
       with:
         # We have to add explicit A records so that redis resolves correctly to the private endpoint address
         inlineScript: |
-          ipv4_address=$(az network private-dns record-set a show --name ${{ env.environment }}-redis --zone-name "privatelink.redis.cache.windows.net" --query "aRecords[0].ipv4Address" -o tsv || echo "")
+          ipv4_address=$(az network private-dns record-set a show --name gov-azure-${{ env.environment }}-redis --zone-name "privatelink.redis.cache.windows.net" --query "aRecords[0].ipv4Address" -o tsv || echo "")
 
-          interface_id=$(az network private-endpoint show --name ${{ env.environment }}-redis --query 'networkInterfaces[0].id' -o tsv)
+          interface_id=$(az network private-endpoint show --name gov-azure-${{ env.environment }}-redis --query 'networkInterfaces[0].id' -o tsv)
           interface_ip=$(az resource show --ids "$interface_id" --query "properties.ipConfigurations[0].properties.privateIPAddress" -o tsv)
           
           # Create
@@ -742,9 +742,9 @@ jobs:
           then
             echo Setting private link IP address...
 
-            az network private-dns record-set a create --name ${{ env.environment }}-redis --zone-name "privatelink.redis.cache.windows.net"
+            az network private-dns record-set a create --name gov-azure-${{ env.environment }}-redis --zone-name "privatelink.redis.cache.windows.net"
             az network private-dns record-set a add-record \
-              --record-set-name ${{ env.environment }}-redis \
+              --record-set-name gov-azure-${{ env.environment }}-redis \
               --zone-name "privatelink.redis.cache.windows.net" \
               --ipv4-address $interface_ip
           fi
@@ -754,10 +754,10 @@ jobs:
           then
             echo Updating private link IP address...
 
-            az network private-dns record-set a delete --name ${{ env.environment }}-redis --zone-name "privatelink.redis.cache.windows.net" --yes
-            az network private-dns record-set a create --name ${{ env.environment }}-redis --zone-name "privatelink.redis.cache.windows.net"
+            az network private-dns record-set a delete --name gov-azure-${{ env.environment }}-redis --zone-name "privatelink.redis.cache.windows.net" --yes
+            az network private-dns record-set a create --name gov-azure-${{ env.environment }}-redis --zone-name "privatelink.redis.cache.windows.net"
             az network private-dns record-set a add-record \
-              --record-set-name ${{ env.environment }}-redis \
+              --record-set-name gov-azure-${{ env.environment }}-redis \
               --zone-name "privatelink.redis.cache.windows.net" \
               --ipv4-address $interface_ip
           fi
@@ -788,7 +788,7 @@ jobs:
             --public-ip-address ${{ env.environment }}-ip \
             --frontend-port 80 \
             --max-capacity 10 --min-capacity 1 \
-            --servers ${{ env.environment }}-portal-ui.azurewebsites.net \
+            --servers gov-azure-${{ env.environment }}-portal-ui.azurewebsites.net \
             --sku Standard_v2
 
     - name: Https ingress for data migration
