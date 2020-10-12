@@ -3,6 +3,8 @@ name: Supporting infrastructure for environments
 on:
   push:
     branches: [ main ]
+  paths: 
+  - '.github/workflows/infrastructure.yml'
 
 env:
   # For creating this secret value, see: https://github.com/marketplace/actions/azure-login#configure-deployment-credentials
