@@ -39,4 +39,4 @@ jobs:
       with:
         inlineScript: |
           # Admin needs to be enabled for App Service continuous deployment
-          az acr create --name tfsdev --sku Standard --admin-enabled true
+          az acr create --name govazuredev --sku Standard --admin-enabled true
