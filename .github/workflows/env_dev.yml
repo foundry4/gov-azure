@@ -1,0 +1,975 @@
+name: Dev environment infrastructure
+
+on:
+  push:
+    branches: [ main ]
+    # paths: 
+    # - '.github/workflows/env_dev.yml'
+
+env:
+  # Environment
+  front_door_access: Allow
+  environment: dev
+  credentials: ${{ secrets.AZURE_CREDENTIALS }}
+  resource_group: dev
+  app_service_plan: dev
+  redis_sku: Basic
+  database_name: mongo
+  application_gateway_cidr: 10.0.0.0/28
+  private_endpoints_cidr: 10.0.1.0/28
+  # Container registry
+  registry: ${{ secrets.DEV_ACR_REGISTRY }}
+  # App service settings
+  DEAL_API_URL: "https://tfs-dev-portal-api.azurewebsites.net"
+  COMPANIES_HOUSE_API_URL: "https://api.companieshouse.gov.uk"
+
+# Below this line should be the same for all environments
+
+jobs:
+
+  vnet:
+    # NB Only one vnet can be associated per App Service Plan,
+    # therefore all App Services on a plan must share a single vnet.
+    # So we name the vnet after the app service plan, rather than the environment.
+    name: Vnet
+    runs-on: ubuntu-latest
+    steps:
+
+    - uses: azure/login@v1
+      with:
+        creds: ${{ env.credentials }}
+
+    - name: Defaults
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az configure --defaults location=uksouth
+          az configure --defaults group=${{ env.resource_group }}
+
+    - name: Vnet
+      uses: Azure/cli@v1.0.0
+      with:
+        # We have to do a show here or we get an error on create if the vnet already exists:
+        inlineScript: |
+          az network vnet show --name ${{ env.app_service_plan }}-vnet || \
+          az network vnet create --name ${{ env.app_service_plan }}-vnet
+
+    - name: Application Gateway subnet
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az network vnet subnet create \
+            --name ${{ env.environment }}-gateway \
+            --vnet-name ${{ env.app_service_plan }}-vnet \
+            --address-prefixes ${{ env.application_gateway_cidr }}
+
+    - name: Private links subnet
+      uses: Azure/cli@v1.0.0
+      with:
+        # Subnet for hosting private endpoints for microservices and backing services.
+        # Apparently you can't both delegate and have private endpoints in the same subnet.
+        inlineScript: |
+          az network vnet subnet show --name ${{ env.environment }}-private-endpoints --vnet-name ${{ env.app_service_plan }}-vnet || \
+          az network vnet subnet create \
+            --name ${{ env.environment }}-private-endpoints \
+            --vnet-name ${{ env.app_service_plan }}-vnet \
+            --address-prefixes ${{ env.private_endpoints_cidr }}
+          az network vnet subnet update \
+            --name ${{ env.environment }}-private-endpoints \
+            --vnet-name ${{ env.app_service_plan }}-vnet \
+            --disable-private-endpoint-network-policies true
+
+    - name: App Service Plan egress subnet
+      uses: Azure/cli@v1.0.0
+      with:
+        # Subnet for delegation to App Service for outbound traffic from microservices
+        # Delegation Microsoft.Web/serverFarms allows only one App Service plan to be associated,
+        # So this subnet is named after the app service plan, rather than after the environment.
+        inlineScript: |
+          az network vnet subnet create \
+            --name ${{ env.app_service_plan }}-app-service-plan-egress \
+            --vnet-name ${{ env.app_service_plan }}-vnet \
+            --delegations Microsoft.Web/serverFarms \
+            --address-prefixes 10.0.200.0/28
+
+    # We'll aim to move this out of this section and consolidate into a single VM job:
+    # - name: Virtual machine subnet
+    #   uses: Azure/cli@v1.0.0
+    #   with:
+    #     # Subnet for a temporary maintenance virtual machine.
+    #     inlineScript: |
+    #       az network vnet subnet create \
+    #         --name ${{ env.resource_group }}-vm \
+    #         --vnet-name ${{ env.app_service_plan }}-vnet \
+    #         --address-prefixes 10.0.210.0/28
+
+  private-dns:
+    name: Private DNS zones
+    needs: vnet
+    runs-on: ubuntu-latest
+    steps:
+
+    - uses: azure/login@v1
+      with:
+        creds: ${{ env.credentials }}
+
+    - name: Defaults
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az configure --defaults location=uksouth
+          az configure --defaults group=${{ env.resource_group }}
+
+    - name: Zones
+      uses: Azure/cli@v1.0.0
+      with:
+        # We have to do a show here or we get an error on create if the zone already exists:
+        inlineScript: |
+          az network private-dns zone show   --name "privatelink.azurewebsites.net" || \
+          az network private-dns zone create --name "privatelink.azurewebsites.net"
+          
+          az network private-dns zone show   --name "privatelink.mongo.cosmos.azure.com" || \
+          az network private-dns zone create --name "privatelink.mongo.cosmos.azure.com"
+          
+          az network private-dns zone show   --name "privatelink.file.core.windows.net" || \
+          az network private-dns zone create --name "privatelink.file.core.windows.net"
+          
+          az network private-dns zone show   --name "privatelink.redis.cache.windows.net" || \
+          az network private-dns zone create --name "privatelink.redis.cache.windows.net"
+
+    - name: Link DNS zones to vnet
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az network private-dns link vnet show   --name app-service-dns --zone-name "privatelink.azurewebsites.net" || \
+          az network private-dns link vnet create --name app-service-dns --zone-name "privatelink.azurewebsites.net" --registration-enabled false --virtual-network ${{ env.app_service_plan }}-vnet
+
+          az network private-dns link vnet show   --name mongo-dns --zone-name "privatelink.mongo.cosmos.azure.com" || \
+          az network private-dns link vnet create --name mongo-dns --zone-name "privatelink.mongo.cosmos.azure.com" --registration-enabled false --virtual-network ${{ env.app_service_plan }}-vnet
+
+          az network private-dns link vnet show   --name storage-dns --zone-name "privatelink.file.core.windows.net" || \
+          az network private-dns link vnet create --name storage-dns --zone-name "privatelink.file.core.windows.net" --registration-enabled false --virtual-network ${{ env.app_service_plan }}-vnet
+
+          az network private-dns link vnet show   --name storage-dns --zone-name "privatelink.redis.cache.windows.net" || \
+          az network private-dns link vnet create --name storage-dns --zone-name "privatelink.redis.cache.windows.net" --registration-enabled false --virtual-network ${{ env.app_service_plan }}-vnet
+
+  public-ip:
+    name: Public IP
+    runs-on: ubuntu-latest
+    steps:
+
+    - uses: azure/login@v1
+      with:
+        creds: ${{ env.credentials }}
+
+    - name: Defaults
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az configure --defaults location=uksouth
+          az configure --defaults group=${{ env.resource_group }}
+
+    - name: IP address
+      uses: Azure/cli@v1.0.0
+      with:
+        # Application Gateway requires Static IP allocation and Standard SKU at the time of writing.
+        inlineScript: |
+          az network public-ip create --name ${{ env.environment }}-ip \
+            --allocation-method Static \
+            --sku Standard
+
+  portal-ui:
+    name: Portal UI
+    needs: [vnet, private-dns]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: azure/login@v1
+      with:
+        creds: ${{ env.credentials }}
+
+    - name: Defaults
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az configure --defaults location=uksouth
+          az configure --defaults group=${{ env.resource_group }}
+
+    - name: Create
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az webapp create --name ${{ env.environment }}-portal-ui \
+            --plan ${{ env.app_service_plan }} \
+            --deployment-container-image-name ${{ env.registry }}/portal-ui:${{ env.environment }}
+
+    - name: Vnet integration
+      uses: Azure/cli@v1.0.0
+      with:
+        # Enable outbound traffic to the private-endpoints subnet so we can access Portal API and Redis
+        inlineScript: |
+          az webapp vnet-integration add --name ${{ env.environment }}-portal-ui \
+            --vnet ${{ env.app_service_plan }}-vnet \
+            --subnet ${{ env.app_service_plan }}-app-service-plan-egress
+
+    - name: Private endpoint
+      uses: Azure/cli@v1.0.0
+      with:
+        # Restrict inbound traffic to not be open to the Internet
+        # NB: group-id isn't well documented. It means "Target sub-resource"
+        #     The purpose of connection-name is unknown.
+        inlineScript: |
+          portal_ui_id=$(az webapp show --name ${{ env.environment }}-portal-ui --query "id" -o tsv)
+          az network private-endpoint create \
+            --name ${{ env.environment }}-portal-ui \
+            --vnet-name ${{ env.app_service_plan }}-vnet \
+            --subnet ${{ env.environment }}-private-endpoints \
+            --private-connection-resource-id "$portal_ui_id" \
+            --group-id sites \
+            --connection-name ${{ env.environment }}-portal-ui
+
+    - name: DNS A-records
+      uses: Azure/cli@v1.0.0
+      with:
+        # We have to add explicit A records so that App Service names resolve correctly to the private endpoint address
+        # https://docs.microsoft.com/en-us/azure/app-service/networking/private-endpoint#dns
+        inlineScript: |
+          ipv4_address=$(az network private-dns record-set a show --name ${{ env.environment }}-portal-ui --zone-name "privatelink.azurewebsites.net" --query "aRecords[0].ipv4Address" -o tsv || echo "")
+
+          interface_id=$(az network private-endpoint show --name ${{ env.environment }}-portal-ui --query 'networkInterfaces[0].id' -o tsv)
+          interface_ip=$(az resource show --ids "$interface_id" --query "properties.ipConfigurations[0].properties.privateIPAddress" -o tsv)
+          
+          # Create
+          if [ -z "$ipv4_address" ]
+          then
+            echo Setting private link IP address...
+
+            az network private-dns record-set a create --name ${{ env.environment }}-portal-ui --zone-name "privatelink.azurewebsites.net"
+            az network private-dns record-set a add-record \
+              --record-set-name ${{ env.environment }}-portal-ui \
+              --zone-name "privatelink.azurewebsites.net" \
+              --ipv4-address $interface_ip
+            
+            az network private-dns record-set a create --name ${{ env.environment }}-portal-ui.scm --zone-name "privatelink.azurewebsites.net"
+            az network private-dns record-set a add-record \
+              --record-set-name ${{ env.environment }}-portal-ui.scm \
+              --zone-name "privatelink.azurewebsites.net" \
+              --ipv4-address $interface_ip
+          fi
+
+          # Update
+          if [ "$ipv4_address" != "$interface_ip" ]
+          then
+            echo Updating private link IP address...
+
+            az network private-dns record-set a delete --name ${{ env.environment }}-portal-ui --zone-name "privatelink.azurewebsites.net" --yes
+            az network private-dns record-set a create --name ${{ env.environment }}-portal-ui --zone-name "privatelink.azurewebsites.net"
+            az network private-dns record-set a add-record \
+              --record-set-name ${{ env.environment }}-portal-ui \
+              --zone-name "privatelink.azurewebsites.net" \
+              --ipv4-address $interface_ip
+
+            az network private-dns record-set a delete --name ${{ env.environment }}-portal-ui.scm --zone-name "privatelink.azurewebsites.net" --yes
+            az network private-dns record-set a create --name ${{ env.environment }}-portal-ui.scm --zone-name "privatelink.azurewebsites.net"
+            az network private-dns record-set a add-record \
+              --record-set-name ${{ env.environment }}-portal-ui.scm \
+              --zone-name "privatelink.azurewebsites.net" \
+              --ipv4-address $interface_ip
+          fi
+
+    - name: Continuous deployment
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az webapp deployment container config --name ${{ env.environment }}-portal-ui \
+            --enable-cd true
+
+    - name: Enable container logging
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az webapp log config --name ${{ env.environment }}-portal-ui \
+            --docker-container-logging filesystem
+
+    - name: Always-on
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az webapp config set --name ${{ env.environment }}-portal-ui \
+            --always-on true
+
+    - name: Environment variables
+      uses: Azure/cli@v1.0.0
+      with:
+        # Apparently the only way to resolve private DNS entries is to use theIP address below. Cool story.
+        # See: https://docs.microsoft.com/en-us/azure/app-service/web-sites-integrate-with-vnet#azure-dns-private-zones
+        # NB we're setting PORT for the container and WEBSITES_PORT for Azure.
+        inlineScript: |
+          az webapp config appsettings set --name ${{ env.environment }}-portal-ui \
+            --settings \
+              PORT=3000 \
+              WEBSITES_PORT=3000 \
+              COMPANIES_HOUSE_API_URL="${{ env.COMPANIES_HOUSE_API_URL }}" \
+              WEBSITE_DNS_SERVER="168.63.129.16" \
+              WEBSITE_VNET_ROUTE_ALL=1
+
+    - name: Secrets
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az webapp config connection-string set --name ${{ env.environment }}-portal-ui \
+            --connection-string-type custom \
+            --settings \
+              REDIS_URI="${{ env.REDIS_URI }}"
+
+
+  cosmos-db-create:
+    name: Cosmos DB (Mongo) Create
+    needs: [vnet, private-dns]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: azure/login@v1
+      with:
+        creds: ${{ env.credentials }}
+
+    - name: Defaults
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az configure --defaults location=uksouth
+          az configure --defaults group=${{ env.resource_group }}
+
+    - name: Remove previous private-endpoint
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az network private-endpoint delete --name "${{ env.environment }}-mongo"
+      
+    - name: Cosmos account for mongodb
+      uses: Azure/cli@v1.0.0
+      with:
+        # On activating "Allow access from Azure Portal":
+        # https://github.com/Azure/azure-cli/issues/7495 ->
+        # https://docs.microsoft.com/en-us/azure/cosmos-db/how-to-configure-firewall#allow-requests-from-the-azure-portal
+        # ALLOW REQUESTS FROM THE AZURE PORTAL
+        # Region IP address
+        # Germany 51.4.229.218
+        # China 139.217.8.252
+        # US Gov 52.244.48.71
+        # All other regions 104.42.195.92,40.76.54.131,52.176.6.30,52.169.50.45,52.187.184.26
+        inlineScript: |
+          az cosmosdb create --name ${{ env.environment }}-mongo --kind MongoDB --server-version 3.6
+
+    - name: Database with autoscale
+      uses: Azure/cli@v1.0.0
+      with:
+        # TODO: switch from provisioned throughput to "serverless" capacity at the account level once it's available for Mongo (currently available for sql).
+        # TODO: enable continuous backup once that becomes available - looks like it's in private beta at the moment.
+        inlineScript: |
+          az cosmosdb mongodb database create --account ${{ env.environment }}-mongo --name ${{ env.database_name }} --max-throughput 4000
+
+  cosmos-db-init:
+    name: Cosmos DB (Mongo) Initialise Collections
+    needs: cosmos-db-create
+    runs-on: ubuntu-latest
+    steps:
+    - uses: azure/login@v1
+      with:
+        creds: ${{ env.credentials }}
+
+    - name: Defaults
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az configure --defaults location=uksouth
+          az configure --defaults group=${{ env.resource_group }}
+
+    - name: Collections
+      uses: Azure/cli@v1.0.0
+      with:
+        # Creating collections is slow, so we show them before we attempt to create.
+        inlineScript: |
+          az cosmosdb mongodb collection show   --account ${{ env.environment }}-mongo --database-name ${{ env.database_name }} --name documents || \
+          az cosmosdb mongodb collection create --account ${{ env.environment }}-mongo --database-name ${{ env.database_name }} --name documents --shard "_id" 
+          #  --idx '[{"key": {"keys": ["indext.key.name"]}}, {"key": {"keys": ["_id"]}}]'     
+          
+    - name: Private link
+      uses: Azure/cli@v1.0.0
+      with:
+        # Restrict inbound traffic to not be open to the Internet
+        # NB: group-id isn't well documented. It means "Target sub-resource"
+        #     The purpose of connection-name is unknown.
+        inlineScript: |
+          mongo_id=$(az cosmosdb show --name ${{ env.environment }}-mongo --query "id" -o tsv)
+          az network private-endpoint create \
+            --name ${{ env.environment }}-mongo \
+            --vnet-name ${{ env.app_service_plan }}-vnet \
+            --subnet ${{ env.environment }}-private-endpoints \
+            --private-connection-resource-id "$mongo_id" \
+            --group-id MongoDB \
+            --connection-name ${{ env.environment }}-mongo
+    
+    - name: DNS A-records
+      uses: Azure/cli@v1.0.0
+      with:
+        # We have to add explicit A records so that Mongo names resolve correctly to the private endpoint address
+        # https://docs.microsoft.com/en-us/azure/cosmos-db/how-to-configure-private-endpoints#integrate-the-private-endpoint-with-a-private-dns-zone-1
+        # NB the zone name needs to be "privatelink.mongo.cosmos.azure.com" rather than "privatelink.documents.azure.com" as per the link above.
+        # NB ipConfigurations[0] appears to be the "primary". There's also a property called "requiredMemberName" that *seems* to be the value needed for record-set-name but I can't find any documentation on it, so sticking with [0] and [1] for now:
+        inlineScript: |
+          ipv4_address=$(az network private-dns record-set a show --name ${{ env.environment }}-mongo --zone-name "privatelink.mongo.cosmos.azure.com" --query "aRecords[0].ipv4Address" -o tsv || echo "")
+
+          if [ -z "$ipv4_address" ]
+          then
+            mongo_interface_id=$(az network private-endpoint show --name ${{ env.environment }}-mongo --query 'networkInterfaces[0].id' -o tsv)
+
+            mongo_interface_ip=$(az resource show --ids $mongo_interface_id --query "properties.ipConfigurations[0].properties.privateIPAddress" -o tsv)
+            az network private-dns record-set a show   --name ${{ env.environment }}-mongo --zone-name "privatelink.mongo.cosmos.azure.com" || \
+            az network private-dns record-set a create --name ${{ env.environment }}-mongo --zone-name "privatelink.mongo.cosmos.azure.com"
+            az network private-dns record-set a add-record \
+              --record-set-name ${{ env.environment }}-mongo \
+              --zone-name "privatelink.mongo.cosmos.azure.com" \
+              --ipv4-address $mongo_interface_ip
+
+            mongo_uksouth_interface_ip=$(az resource show --ids $mongo_interface_id --query "properties.ipConfigurations[1].properties.privateIPAddress" -o tsv)
+            az network private-dns record-set a show   --name ${{ env.environment }}-mongo-uksouth --zone-name "privatelink.mongo.cosmos.azure.com" || \
+            az network private-dns record-set a create --name ${{ env.environment }}-mongo-uksouth --zone-name "privatelink.mongo.cosmos.azure.com"
+            az network private-dns record-set a add-record \
+              --record-set-name ${{ env.environment }}-mongo-uksouth \
+              --zone-name "privatelink.mongo.cosmos.azure.com" \
+              --ipv4-address $mongo_uksouth_interface_ip
+
+          else
+            echo "IP for ${{ env.environment }}-mongo.privatelink.mongo.cosmos.azure.com is $ipv4_address"
+          fi
+              
+
+  portal-api:
+    name: Portal API
+    needs: [vnet, private-dns, cosmos-db-create]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: azure/login@v1
+      with:
+        creds: ${{ env.credentials }}
+
+    - name: Defaults
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az configure --defaults location=uksouth
+          az configure --defaults group=${{ env.resource_group }}
+
+    - name: Create
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az webapp create --name ${{ env.environment }}-portal-api \
+            --plan ${{ env.app_service_plan }} \
+            --deployment-container-image-name ${{ env.registry }}/portal-api:${{ env.environment }}
+
+    - name: Vnet integration
+      uses: Azure/cli@v1.0.0
+      with:
+        # Enable outbound traffic from Portal API to the services subnet so we can access Cosmos and Storage
+        inlineScript: |
+          az webapp vnet-integration add --name ${{ env.environment }}-portal-api \
+            --vnet ${{ env.app_service_plan }}-vnet \
+            --subnet ${{ env.app_service_plan }}-app-service-plan-egress
+
+    - name: Private endpoint
+      uses: Azure/cli@v1.0.0
+      with:
+        # Restrict inbound traffic to not be open to the Internet
+        # NB: group-id isn't well documented. It means "Target sub-resource".
+        #     The purpose of connection-name is unknown.
+        inlineScript: |
+          portal_api_id=$(az webapp show --name ${{ env.environment }}-portal-api --query "id" -o tsv)
+          az network private-endpoint create \
+            --name ${{ env.environment }}-portal-api \
+            --vnet-name ${{ env.app_service_plan }}-vnet \
+            --subnet ${{ env.environment }}-private-endpoints \
+            --private-connection-resource-id "$portal_api_id" \
+            --group-id sites \
+            --connection-name ${{ env.environment }}-portal-api
+
+    - name: DNS A-records
+      uses: Azure/cli@v1.0.0
+      with:
+        # We have to add explicit A records so that App Service names resolve correctly to the private endpoint address
+        # https://docs.microsoft.com/en-us/azure/app-service/networking/private-endpoint#dns
+        # NB the -z tests below are checking 
+        inlineScript: |
+          ipv4_address=$(az network private-dns record-set a show --name ${{ env.environment }}-portal-api --zone-name "privatelink.azurewebsites.net" --query "aRecords[0].ipv4Address" -o tsv || echo "")
+
+          interface_id=$(az network private-endpoint show --name ${{ env.environment }}-portal-api --query 'networkInterfaces[0].id' -o tsv)
+          interface_ip=$(az resource show --ids "$interface_id" --query "properties.ipConfigurations[0].properties.privateIPAddress" -o tsv)
+          
+          # Create
+          if [ -z "$ipv4_address" ]
+          then
+            echo Setting private link IP address...
+
+            az network private-dns record-set a create --name ${{ env.environment }}-portal-api --zone-name "privatelink.azurewebsites.net"
+            az network private-dns record-set a add-record \
+              --record-set-name ${{ env.environment }}-portal-api \
+              --zone-name "privatelink.azurewebsites.net" \
+              --ipv4-address $interface_ip
+            
+            az network private-dns record-set a create --name ${{ env.environment }}-portal-api.scm --zone-name "privatelink.azurewebsites.net"
+            az network private-dns record-set a add-record \
+              --record-set-name ${{ env.environment }}-portal-api.scm \
+              --zone-name "privatelink.azurewebsites.net" \
+              --ipv4-address $interface_ip
+          fi
+
+          # Update
+          if [ "$ipv4_address" != "$interface_ip" ]
+          then
+            echo Update private link IP address...
+
+            az network private-dns record-set a delete --name ${{ env.environment }}-portal-api --zone-name "privatelink.azurewebsites.net" --yes
+            az network private-dns record-set a create --name ${{ env.environment }}-portal-api --zone-name "privatelink.azurewebsites.net"
+            az network private-dns record-set a add-record \
+              --record-set-name ${{ env.environment }}-portal-api \
+              --zone-name "privatelink.azurewebsites.net" \
+              --ipv4-address $interface_ip
+
+            az network private-dns record-set a delete --name ${{ env.environment }}-portal-api.scm --zone-name "privatelink.azurewebsites.net" --yes
+            az network private-dns record-set a create --name ${{ env.environment }}-portal-api.scm --zone-name "privatelink.azurewebsites.net"
+            az network private-dns record-set a add-record \
+              --record-set-name ${{ env.environment }}-portal-api.scm \
+              --zone-name "privatelink.azurewebsites.net" \
+              --ipv4-address $interface_ip
+          fi
+
+    - name: Continuous deployment
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az webapp deployment container config --name ${{ env.environment }}-portal-api \
+            --enable-cd true
+
+    - name: Enable container logging
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az webapp log config --name ${{ env.environment }}-portal-api \
+            --docker-container-logging filesystem
+
+    - name: Always-on
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az webapp config set --name ${{ env.environment }}-portal-api \
+            --always-on true
+
+    - name: Environment variables
+      uses: Azure/cli@v1.0.0
+      with:
+        # Apparently the only way to resolve private DNS entries is to use theIP address below. Cool story.
+        # See: https://docs.microsoft.com/en-us/azure/app-service/web-sites-integrate-with-vnet#azure-dns-private-zones
+        # NB we're setting PORT for the container and WEBSITES_PORT for Azure.
+        inlineScript: |
+          az webapp config appsettings set --name ${{ env.environment }}-portal-api \
+            --settings \
+              PORT=5000 \
+              WEBSITES_PORT=5000 \
+              WEBSITE_DNS_SERVER="168.63.129.16" \
+              WEBSITE_VNET_ROUTE_ALL=1
+
+    - name: Secrets
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          mongo_connection_string=$(az cosmosdb keys list --name ${{ env.environment }}-mongo --type connection-strings --query "connectionStrings[0].connectionString" -o tsv | sed -e "s/&replicaSet=globaldb//g")
+
+          echo "Mongo connection string: $mongo_connection_string"
+          
+          az webapp config connection-string set --name ${{ env.environment }}-portal-api \
+            --connection-string-type custom \
+            --settings \
+              STORAGE_ACCOUNT="${{ env.AZURE_PORTAL_STORAGE_ACCOUNT }}" \
+              STORAGE_ACCESS_KEY="${{ env.AZURE_PORTAL_STORAGE_ACCESS_KEY }}" \
+              MONGODB_URI="$mongo_connection_string"
+
+                
+  file-storage:
+    name: File storage
+    needs: [vnet, private-dns]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: azure/login@v1
+      with:
+        creds: ${{ env.credentials }}
+
+    - name: Defaults
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az configure --defaults location=uksouth
+          az configure --defaults group=${{ env.resource_group }}
+
+    - name: Create
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az storage account create --name ${{ env.environment }}storage \
+            --sku Standard_ZRS \
+            --https-only true \
+            --encryption-services file
+
+    - name: File share (files)
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az storage share create --account-name ${{ env.environment }}storage --name files
+
+    - name: File share (workflow)
+      uses: Azure/cli@v1.0.0
+      with:
+        # This fileshare is used if the environment isn't integrated to Workflow.
+        inlineScript: |
+          az storage share create --account-name ${{ env.environment }}storage --name workflow
+
+    - name: Private link
+      uses: Azure/cli@v1.0.0
+      with:
+        # Restrict inbound traffic to not be open to the Internet
+        # NB: group-id isn't well documented. It means "Target sub-resource"
+        #     The purpose of connection-name is unknown.
+        inlineScript: |
+          file_storage_id=$(az storage account show --name ${{ env.environment }}storage --query "id" -o tsv)
+          az network private-endpoint create \
+            --name ${{ env.environment }}storage \
+            --vnet-name ${{ env.app_service_plan }}-vnet \
+            --subnet ${{ env.environment }}-private-endpoints \
+            --private-connection-resource-id "$file_storage_id" \
+            --group-id file \
+            --connection-name ${{ env.environment }}storage
+             
+    - name: DNS A-records
+      uses: Azure/cli@v1.0.0
+      with:
+        # We have to add explicit A records so that Stogare Accounts resolve correctly to the private endpoint address
+        # https://docs.microsoft.com/en-us/azure/storage/files/storage-files-networking-endpoints?tabs=azure-cli
+        inlineScript: |
+          ipv4_address=$(az network private-dns record-set a show --name ${{ env.environment }}storage --zone-name "privatelink.file.core.windows.net" --query "aRecords[0].ipv4Address" -o tsv || echo "")
+
+          interface_id=$(az network private-endpoint show --name ${{ env.environment }}storage --query 'networkInterfaces[0].id' -o tsv)
+          interface_ip=$(az resource show --ids "$interface_id" --query "properties.ipConfigurations[0].properties.privateIPAddress" -o tsv)
+          
+          # Create
+          if [ -z "$ipv4_address" ]
+          then
+            echo Setting private link IP address...
+
+            az network private-dns record-set a create --name ${{ env.environment }}storage --zone-name "privatelink.file.core.windows.net"
+            az network private-dns record-set a add-record \
+              --record-set-name ${{ env.environment }}storage \
+              --zone-name "privatelink.file.core.windows.net" \
+              --ipv4-address $interface_ip
+          fi
+
+          # Update
+          if [ "$ipv4_address" != "$interface_ip" ]
+          then
+            echo Updating private link IP address...
+
+            az network private-dns record-set a delete --name ${{ env.environment }}storage --zone-name "privatelink.file.core.windows.net" --yes
+            az network private-dns record-set a create --name ${{ env.environment }}storage --zone-name "privatelink.file.core.windows.net"
+            az network private-dns record-set a add-record \
+              --record-set-name ${{ env.environment }}storage \
+              --zone-name "privatelink.file.core.windows.net" \
+              --ipv4-address $interface_ip
+          fi
+           
+          
+  redis:
+    name: Redis session store
+    needs: [vnet, private-dns]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: azure/login@v1
+      with:
+        creds: ${{ env.credentials }}
+
+    - name: Defaults
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az configure --defaults location=uksouth
+          az configure --defaults group=${{ env.resource_group }}
+
+    - name: Create
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az redis create --name ${{ env.environment }}-redis \
+            --sku ${{ env.redis_sku }} \
+            --vm-size C0
+    
+    # Apparently private link for Redis is in preview, but it's not available in the Azure portal:
+    # https://docs.microsoft.com/en-us/azure/azure-cache-for-redis/cache-private-link
+    # This may have changed as of 6 Oct 2020
+    - name: Private link
+      uses: Azure/cli@v1.0.0
+      with:
+        # Restrict inbound traffic to not be open to the Internet
+        # NB: group-id isn't well documented. It means "Target sub-resource"
+        #     The purpose of connection-name is unknown.
+        inlineScript: |
+          redis_id=$(az redis show --name ${{ env.environment }}-redis --query "id" -o tsv)
+          az network private-endpoint create \
+            --name ${{ env.environment }}-redis \
+            --vnet-name ${{ env.app_service_plan }}-vnet \
+            --subnet ${{ env.environment }}-private-endpoints \
+            --private-connection-resource-id "$redis_id" \
+            --group-id redisCache \
+            --connection-name ${{ env.environment }}-redis
+             
+    - name: DNS A-records
+      uses: Azure/cli@v1.0.0
+      with:
+        # We have to add explicit A records so that redis resolves correctly to the private endpoint address
+        inlineScript: |
+          ipv4_address=$(az network private-dns record-set a show --name ${{ env.environment }}-redis --zone-name "privatelink.redis.cache.windows.net" --query "aRecords[0].ipv4Address" -o tsv || echo "")
+
+          interface_id=$(az network private-endpoint show --name ${{ env.environment }}-redis --query 'networkInterfaces[0].id' -o tsv)
+          interface_ip=$(az resource show --ids "$interface_id" --query "properties.ipConfigurations[0].properties.privateIPAddress" -o tsv)
+          
+          # Create
+          if [ -z "$ipv4_address" ]
+          then
+            echo Setting private link IP address...
+
+            az network private-dns record-set a create --name ${{ env.environment }}-redis --zone-name "privatelink.redis.cache.windows.net"
+            az network private-dns record-set a add-record \
+              --record-set-name ${{ env.environment }}-redis \
+              --zone-name "privatelink.redis.cache.windows.net" \
+              --ipv4-address $interface_ip
+          fi
+
+          # Update
+          if [ "$ipv4_address" != "$interface_ip" ]
+          then
+            echo Updating private link IP address...
+
+            az network private-dns record-set a delete --name ${{ env.environment }}-redis --zone-name "privatelink.redis.cache.windows.net" --yes
+            az network private-dns record-set a create --name ${{ env.environment }}-redis --zone-name "privatelink.redis.cache.windows.net"
+            az network private-dns record-set a add-record \
+              --record-set-name ${{ env.environment }}-redis \
+              --zone-name "privatelink.redis.cache.windows.net" \
+              --ipv4-address $interface_ip
+          fi
+
+  application-gateway:
+    name: Application Gateway
+    needs: [vnet, public-ip]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: azure/login@v1
+      with:
+        creds: ${{ env.credentials }}
+
+    - name: Defaults
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az configure --defaults location=uksouth
+          az configure --defaults group=${{ env.resource_group }}
+
+    - name: Create
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az network application-gateway create --name ${{ env.environment }}-gw \
+            --vnet-name ${{ env.app_service_plan }}-vnet \
+            --subnet ${{ env.environment }}-gateway \
+            --public-ip-address ${{ env.environment }}-ip \
+            --frontend-port 80 \
+            --max-capacity 10 --min-capacity 1 \
+            --servers ${{ env.environment }}-portal-ui.azurewebsites.net \
+            --sku Standard_v2
+
+    - name: Https ingress for data migration
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          cert="${{ env.MIGRATION_SSL_CERTIFICATE }}"
+          if [ ! -z "$cert" ]
+          then
+            # Create the certificate file from the secret value:
+            echo $cert | base64 -d > cert.pfx
+
+            az network application-gateway ssl-cert create \
+              --gateway-name ${{ env.environment }}-gw \
+              --name ${{ env.environment }}-cert \
+              --cert-password ${{ env.MIGRATION_SSL_CERTIFICATE_PASSWORD }} \
+              --cert-file cert.pfx
+
+            echo "Creating frontend port"
+            az network application-gateway frontend-port create \
+              --gateway-name ${{ env.environment }}-gw \
+              --name ${{ env.environment }}-port-https \
+              --port 443
+
+            echo "Creating HTTP listener..."
+            az network application-gateway http-listener create \
+              --gateway-name ${{ env.environment }}-gw \
+              --name ${{ env.environment }}-https \
+              --frontend-port ${{ env.environment }}-port-https \
+              --ssl-cert ${{ env.environment }}-cert
+
+            echo "Creating rule..."
+            az network application-gateway rule create \
+              --gateway-name ${{ env.environment }}-gw \
+              --name ${{ env.environment }}-migration \
+              --http-listener ${{ env.environment }}-https \
+              --http-settings appGatewayBackendHttpSettings \
+              --address-pool appGatewayBackendPool
+          fi
+
+    - name: Network Security Group
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az network nsg create  --name ${{ env.environment }}-gw-nsg
+
+    - name: Application Gateway management traffic
+      uses: Azure/cli@v1.0.0
+      with:
+        # The "GatewayManager" rule is explained in the Application Gateway FAQ: 
+        #   https://docs.microsoft.com/en-us/azure/application-gateway/application-gateway-faq#how-do-i-use-application-gateway-v2-with-only-private-frontend-ip-address
+        # See also: https://stackoverflow.com/questions/52674810/azure-app-gateway-v2-cannot-be-configured-with-nsg/52697957
+        inlineScript: |
+          az network nsg rule create --name gateway-manager --nsg-name ${{ env.environment }}-gw-nsg \
+            --priority 100 --direction Inbound --protocol "*" --access Allow \
+            --source-address-prefixes "GatewayManager" --source-port-ranges "*" \
+            --destination-address-prefixes "*" --destination-port-ranges "65200-65535"
+
+    - name: ${{ env.front_door_access }} Front Door traffic
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az network nsg rule create --name front-door --nsg-name ${{ env.environment }}-gw-nsg \
+            --priority 200 --direction Inbound --protocol "*" --access ${{ env.front_door_access }} \
+            --source-address-prefixes "AzureFrontDoor.Backend" --source-port-ranges "*" \
+            --destination-address-prefixes "*" --destination-port-ranges "*"
+
+    - name: Temporary team IPs
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+
+          # VMs
+          az network nsg rule create --name vm-ips-dev --nsg-name ${{ env.environment }}-gw-nsg \
+            --priority 997 --direction Inbound --protocol "*" --access Allow \
+            --source-address-prefixes "51.104.202.42" --source-port-ranges "*" \
+            --destination-address-prefixes "*" --destination-port-ranges "*"
+          az network nsg rule create --name vm-ips-test --nsg-name ${{ env.environment }}-gw-nsg \
+            --priority 998 --direction Inbound --protocol "*" --access Allow \
+            --source-address-prefixes "51.11.144.7" --source-port-ranges "*" \
+            --destination-address-prefixes "*" --destination-port-ranges "*"
+          az network nsg rule create --name vm-ips-prod --nsg-name ${{ env.environment }}-gw-nsg \
+            --priority 999 --direction Inbound --protocol "*" --access Allow \
+            --source-address-prefixes "51.145.36.44" --source-port-ranges "*" \
+            --destination-address-prefixes "*" --destination-port-ranges "*"
+
+          # David
+          az network nsg rule create --name team-ips-david --nsg-name ${{ env.environment }}-gw-nsg \
+            --priority 1000 --direction Inbound --protocol "*" --access Allow \
+            --source-address-prefixes "195.188.184.171" --source-port-ranges "*" \
+            --destination-address-prefixes "*" --destination-port-ranges "*"
+
+          # Andrew
+          az network nsg rule create --name team-ips-andrew --nsg-name ${{ env.environment }}-gw-nsg \
+            --priority 2000 --direction Inbound --protocol "*" --access Allow \
+            --source-address-prefixes "81.174.144.245" --source-port-ranges "*" \
+            --destination-address-prefixes "*" --destination-port-ranges "*"
+
+          # Dan B
+          az network nsg rule create --name team-ips-danb --nsg-name ${{ env.environment }}-gw-nsg \
+            --priority 3000 --direction Inbound --protocol "*" --access Allow \
+            --source-address-prefixes "51.140.76.208" --source-port-ranges "*" \
+            --destination-address-prefixes "*" --destination-port-ranges "*"
+
+          # Caroline
+          az network nsg rule create --name team-ips-caroline --nsg-name ${{ env.environment }}-gw-nsg \
+            --priority 4000 --direction Inbound --protocol "*" --access Allow \
+            --source-address-prefixes "51.140.76.208" --source-port-ranges "*" \
+            --destination-address-prefixes "*" --destination-port-ranges "*"
+
+    - name: Associate NSG to gateway subnet
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az network vnet subnet update --name ${{ env.environment }}-gateway --vnet-name ${{ env.app_service_plan }}-vnet --network-security-group ${{ env.environment }}-gw-nsg
+
+    - name: Healthcheck probe
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az network application-gateway probe create --name healthcheck \
+            --gateway-name ${{ env.environment }}-gw \
+            --protocol Https \
+            --path "/healthcheck" \
+            --host-name-from-http-settings true
+
+    - name: Update back-end http settings
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          httpsettings_name=$(az network application-gateway show --name ${{ env.environment }}-gw --query "backendHttpSettingsCollection[0].name" -o tsv)
+          az network application-gateway http-settings update --name $httpsettings_name \
+            --gateway-name ${{ env.environment }}-gw \
+            --host-name-from-backend-pool true \
+            --probe healthcheck --enable-probe true \
+            --protocol Https --port 443
+
+  front-door:
+    # NB Front Door takes a little while to be available
+    # So you won't get a successful request for the first few minutes.
+    name: WAF/DDoS
+    needs: application-gateway
+    runs-on: ubuntu-latest
+    steps:
+    - uses: azure/login@v1
+      with:
+        creds: ${{ env.credentials }}
+
+    - name: Defaults
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az configure --defaults location=uksouth
+          az configure --defaults group=${{ env.resource_group }}
+
+          # Front door requires an extension to the az cli:
+          az extension add --name front-door
+
+    - name: Create
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          gateway_ip_id=$(az network application-gateway show --name ${{ env.environment }}-gw --query "frontendIpConfigurations[0].publicIpAddress.id" -o tsv)
+          gateway_ip=$(az resource show --ids "$gateway_ip_id" --query "properties.ipAddress" -o tsv)
+
+          az network front-door create --name ${{ env.environment }}-fd \
+            --accepted-protocols Https \
+            --forwarding-protocol HttpOnly \
+            --backend-address $gateway_ip \
+            --probeMethod GET \
+            --protocol Http \
+            --path "/healthcheck"
+
+    - name: Redirect to https
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          frontend_endpoint_name=$(az network front-door show --name ${{ env.environment }}-fd --query "frontendEndpoints[0].name" -o tsv)
+          az network front-door routing-rule create --front-door-name ${{ env.environment }}-fd \
+            --name RedirectToHttps \
+            --frontend-endpoints $frontend_endpoint_name \
+            --route-type Redirect \
+            --accepted-protocols Http \
+            --redirect-protocol HttpsOnly
