@@ -1,0 +1,40 @@
+name: Supporting infrastructure for environments
+
+on:
+  push:
+    branches: [ main ]
+
+env:
+  credentials: ${{ secrets.AZURE_CREDENTIALS }}
+
+jobs:
+
+  # Todo: add auto-scaling to App Service plans, although it's unlikely there'll be enough traffic to need it.
+
+  dev-rg:
+    name: Dev resource group
+    runs-on: ubuntu-latest
+    steps:
+    - uses: azure/login@v1
+      with:
+        creds: ${{ credentials }}
+
+    - name: Defaults
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az configure --defaults location=uksouth
+          az configure --defaults group=${{ secrets.DEV_RESOURCE_GROUP }}
+
+    - name: App Service plan
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          az appservice plan create --name dev --is-linux --sku p1v2
+
+    - name: Container registry
+      uses: Azure/cli@v1.0.0
+      with:
+        inlineScript: |
+          # Admin needs to be enabled for App Service continuous deployment
+          az acr create --name tfsdev --sku Standard --admin-enabled true
