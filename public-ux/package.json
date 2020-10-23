@@ -9,14 +9,14 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/davidcarboni/accelerate-metrics.git"
+    "url": "git+https://github.com/davidcarboni/gov-azure.git"
   },
   "author": "David Carboni",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/davidcarboni/accelerate-metrics/issues"
+    "url": "https://github.com/davidcarboni/gov-azure/issues"
   },
-  "homepage": "https://github.com/davidcarboni/accelerate-metrics#readme",
+  "homepage": "https://github.com/davidcarboni/gov-azure#readme",
   "dependencies": {
     "govuk-frontend": "^3.9.1"
   },
